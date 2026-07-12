@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vapoursynth-misc"
-version = "1.0"
+version = "2.0"
 description = "Miscellaneous VapourSynth filters: SCDetect, AverageFrames, and Hysteresis"
 readme = "README.md"
 license = { file = "LICENSE" }

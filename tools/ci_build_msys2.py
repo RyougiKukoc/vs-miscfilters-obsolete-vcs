@@ -63,6 +63,10 @@ def candidate_msys2_prefixes(env: dict[str, str]) -> list[Path]:
     msystem_prefix = env.get("MSYSTEM_PREFIX")
     if msystem_prefix:
         prefixes.append(Path(msystem_prefix))
+    for key in ("MISC_MSYS2_ROOT", "MSYS2_ROOT"):
+        value = env.get(key)
+        if value:
+            prefixes.append(Path(value) / "ucrt64")
     prefixes.extend(
         [
             ROOT.parents[2] / "msys2" / "ucrt64",

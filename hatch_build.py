@@ -64,8 +64,44 @@ def _fetch_prebuilt_archive(source: str, destination: Path) -> None:
         return
 
     request = urllib.request.Request(source, headers={"User-Agent": "vapoursynth-misc-build-hook"})
-    with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as handle:
-        shutil.copyfileobj(response, handle)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+        return
+    except Exception as first_exc:
+        curl = shutil.which("curl.exe") or shutil.which("curl")
+        if curl:
+            try:
+                subprocess.run(
+                    [curl, "-L", "--fail", "--silent", "--show-error", "-o", str(destination), source],
+                    check=True,
+                    cwd=ROOT,
+                )
+                return
+            except Exception as curl_exc:
+                first_exc = curl_exc
+
+        powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
+        if powershell:
+            try:
+                subprocess.run(
+                    [
+                        powershell,
+                        "-NoProfile",
+                        "-Command",
+                        (
+                            "$ProgressPreference='SilentlyContinue'; "
+                            f"Invoke-WebRequest -Uri '{source}' -OutFile '{destination}'"
+                        ),
+                    ],
+                    check=True,
+                    cwd=ROOT,
+                )
+                return
+            except Exception as ps_exc:
+                first_exc = ps_exc
+
+        raise first_exc
 
 
 def _stage_package_from_zip(archive_path: Path, target_dir: Path) -> None:
@@ -166,11 +202,23 @@ def _configure_windows_build_env(env: dict[str, str]) -> dict[str, str]:
         prefix = Path(msystem_prefix)
         path_entries.extend([prefix / "bin", prefix.parent / "usr" / "bin"])
     else:
-        workspace_msys2 = ROOT.parents[2] / "msys2"
+        msys2_roots: list[Path] = []
+        for key in ("MISC_MSYS2_ROOT", "MSYS2_ROOT"):
+            value = env.get(key)
+            if value:
+                msys2_roots.append(Path(value))
+        msys2_roots.extend(
+            [
+                ROOT.parents[2] / "msys2",
+                Path(r"C:\msys64"),
+            ]
+        )
+
+        for root in msys2_roots:
+            path_entries.extend([root / "ucrt64" / "bin", root / "usr" / "bin"])
+
         path_entries.extend(
             [
-                workspace_msys2 / "ucrt64" / "bin",
-                workspace_msys2 / "usr" / "bin",
                 Path(r"C:\msys64\ucrt64\bin"),
                 Path(r"C:\msys64\usr\bin"),
             ]
