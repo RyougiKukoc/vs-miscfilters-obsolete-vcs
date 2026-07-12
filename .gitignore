@@ -30,3 +30,13 @@
 *.exe
 *.out
 *.app
+
+# Local build and packaging outputs
+_deps/
+build-*/
+build*/
+dist/
+vapoursynth/
+__pycache__/
+*.whl
+*.zip

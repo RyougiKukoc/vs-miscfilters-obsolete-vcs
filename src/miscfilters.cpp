@@ -58,11 +58,11 @@ public:
 };
 
 template<typename T>
-static void VS_CC filterFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC filterFree(void *instanceData, VSCore *, const VSAPI *) {
     delete reinterpret_cast<T *>(instanceData);
 }
 
-static bool is8to16orFloatFormat(const VSVideoFormat &fi, bool allowVariable = false, bool allowCompat = false) {
+static bool is8to16orFloatFormat(const VSVideoFormat &fi, bool allowVariable = false) {
     if (fi.colorFamily == cfUndefined && !allowVariable)
         return false;
 
@@ -100,7 +100,7 @@ typedef struct {
 
 typedef DualNodeData<SCDetectDataExtra> SCDetectData;
 
-static const VSFrame *VS_CC scDetectGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+static const VSFrame *VS_CC scDetectGetFrame(int n, int activationReason, void *instanceData, void **, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     SCDetectData *d = static_cast<SCDetectData *>(instanceData);
 
     if (activationReason == arInitial) {
@@ -129,7 +129,7 @@ static const VSFrame *VS_CC scDetectGetFrame(int n, int activationReason, void *
     return nullptr;
 }
 
-static void VS_CC scDetectCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC scDetectCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) {
     std::unique_ptr<SCDetectData> d(new SCDetectData(vsapi));
     int err;
     d->threshold = vsapi->mapGetFloat(in, "threshold", 0, &err);
@@ -174,7 +174,7 @@ static void VS_CC scDetectCreate(const VSMap *in, VSMap *out, void *userData, VS
 ///////////////////////////////////////
 // AverageFrames
 
-static void VS_CC averageFramesCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC averageFramesCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) {
     VSPlugin *plugin = vsapi->getPluginByID(VSH_STD_PLUGIN_ID, core);
     VSMap *result = vsapi->invoke(plugin, "AverageFrames", in);
     if (vsapi->mapGetError(result)) {
@@ -256,7 +256,7 @@ static void process_frame_hysteresis(const VSFrame * src1, const VSFrame * src2,
     delete[] label;
 }
 
-static const VSFrame *VS_CC hysteresisGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+static const VSFrame *VS_CC hysteresisGetFrame(int n, int activationReason, void *instanceData, void **, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     HysteresisData * d = static_cast<HysteresisData *>(instanceData);
 
     if (activationReason == arInitial) {
@@ -285,7 +285,7 @@ static const VSFrame *VS_CC hysteresisGetFrame(int n, int activationReason, void
     return nullptr;
 }
 
-static void VS_CC hysteresisCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+static void VS_CC hysteresisCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) {
     std::unique_ptr<HysteresisData> d(new HysteresisData(vsapi));
 
     d->node1 = vsapi->mapGetNode(in, "clipa", 0, nullptr);

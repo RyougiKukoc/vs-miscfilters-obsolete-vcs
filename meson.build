@@ -4,15 +4,18 @@ project('Miscfilters', 'cpp',
   version : '1'
 )
 
+plugin_name = 'miscfilters'
+
 sources = [
   'src/miscfilters.cpp'
 ]
 
-dep = dependency('vapoursynth', version: '>=55').partial_dependency(compile_args : true, includes : true)
+vapoursynth_dep = dependency('vapoursynth', version: '>=55').partial_dependency(compile_args : true, includes : true)
 
-shared_module('miscfilters', sources,
-  dependencies : dep,
+shared_module(plugin_name, sources,
+  dependencies : vapoursynth_dep,
+  name_prefix : '',
   install : true,
-  install_dir : join_paths(dep.get_pkgconfig_variable('libdir'), 'vapoursynth'),
+  install_dir : join_paths(vapoursynth_dep.get_pkgconfig_variable('libdir'), 'plugins', 'misc'),
   gnu_symbol_visibility : 'hidden'
 )
