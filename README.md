@@ -17,8 +17,9 @@ python -m pip install -v "vapoursynth-misc @ git+https://github.com/RyougiKukoc/
 ```
 
 On Windows x86_64, the build hook first tries to reuse the tested GitHub Release asset
-`misc-msys2-ucrt64.zip`. If no matching release asset is available, it falls back to a
-local MSYS2/UCRT64 Meson build.
+`misc-msys2-ucrt64.zip`. If that asset cannot be downloaded, installation now stops with
+a clear error instead of falling back to a local Meson build. For offline or mirrored
+installs, point `MISC_PREBUILT_URL` at a local `misc-msys2-ucrt64.zip`.
 
 ## Release package layout
 
@@ -37,6 +38,7 @@ The manifest loads `miscfilters.dll`, while the VapourSynth namespace remains `c
 ## Source build notes
 
 This repository also keeps the upstream Meson and Visual Studio project files. The local
-CI and packaging path validated here is MSYS2/UCRT64 plus the VapourSynth R77 wheel SDK.
+CI build path validated here is MSYS2/UCRT64 plus the VapourSynth R77 wheel SDK, while
+end-user `pip install git+...` repackages the tested release asset instead of compiling.
 
 Filter behavior reference text remains in [docs/misc.rst](docs/misc.rst).
