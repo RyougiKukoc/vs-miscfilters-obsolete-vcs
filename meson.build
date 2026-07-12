@@ -1,7 +1,7 @@
 project('Miscfilters', 'cpp',
   default_options: ['buildtype=release', 'warning_level=2', 'b_ndebug=if-release', 'cpp_std=c++14'],
   meson_version : '>=0.48.0',
-  version : '1'
+  version : '2.0'
 )
 
 plugin_name = 'miscfilters'
