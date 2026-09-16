@@ -7,6 +7,8 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
+import sysconfig
 import tarfile
 import tempfile
 import tomllib
@@ -19,7 +21,11 @@ ROOT = Path(__file__).resolve().parent
 PACKAGE_NAME = "misc"
 PLUGIN_BASENAME = "miscfilters"
 DEFAULT_REPOSITORY = "RyougiKukoc/vs-miscfilters-obsolete-vcs"
-DEFAULT_PREBUILT_ASSET = "misc-msys2-ucrt64.zip"
+PREBUILT_ASSETS = {
+    "win32": "misc-msys2-ucrt64.zip",
+    "linux": "misc-linux-x86_64.zip",
+}
+LINUX_PLATFORM_TAG = "manylinux_2_27_x86_64"
 SDIST_INCLUDE = [
     "LICENSE",
     "README.md",
@@ -61,72 +67,55 @@ def _dist_info_dirname() -> str:
     return f"{_distribution_name()}-{_project_version()}.dist-info"
 
 
-def _wheel_tag() -> str:
-    machine = platform.machine().lower()
-    if sys_platform() != "win32" or machine not in {"amd64", "x86_64"}:
-        raise RuntimeError(
-            "vapoursynth-misc source/VCS installs currently support Windows x86_64 only. "
-            "Use the published wheel or release zip on other platforms."
-        )
-    return "py3-none-win_amd64"
+def _platform_name() -> str:
+    return os.environ.get("_PYPROJECT_BUILD_PLATFORM") or sys.platform
 
 
-def sys_platform() -> str:
-    return os.environ.get("_PYPROJECT_BUILD_PLATFORM") or os.sys.platform
+def _machine_name() -> str:
+    return platform.machine().lower()
 
 
-def _default_prebuilt_url(version: str) -> str:
+def _is_x86_64() -> bool:
+    return _machine_name() in {"amd64", "x86_64"}
+
+
+def _plugin_suffix() -> str:
+    current = _platform_name()
+    if current == "win32":
+        return ".dll"
+    if current == "darwin":
+        return ".dylib"
+    if current.startswith("linux"):
+        return ".so"
+    raise RuntimeError(f"vapoursynth-misc does not support native builds on {current!r}")
+
+
+def _prebuilt_asset() -> str | None:
+    current = _platform_name()
+    if current == "win32" and _is_x86_64():
+        return PREBUILT_ASSETS["win32"]
+    if current.startswith("linux") and _is_x86_64():
+        return PREBUILT_ASSETS["linux"]
+    return None
+
+
+def _default_prebuilt_url(version: str, asset: str) -> str:
     repository = os.environ.get("MISC_PREBUILT_REPOSITORY") or os.environ.get("GITHUB_REPOSITORY") or DEFAULT_REPOSITORY
     tag = os.environ.get("MISC_PREBUILT_TAG") or f"v{version}"
-    asset = os.environ.get("MISC_PREBUILT_ASSET_NAME") or DEFAULT_PREBUILT_ASSET
     return f"https://github.com/{repository}/releases/download/{tag}/{asset}"
 
 
-def _prebuilt_source() -> str:
-    return os.environ.get("MISC_PREBUILT_URL") or _default_prebuilt_url(_project_version())
+def _prebuilt_source(version: str, asset: str) -> tuple[str, bool]:
+    explicit = os.environ.get("MISC_PREBUILT_URL")
+    if explicit:
+        return explicit, True
+    return _default_prebuilt_url(version, asset), False
 
 
 def _copy_local_prebuilt(source: Path, destination: Path) -> None:
     if source.is_dir():
-        raise RuntimeError(
-            f"MISC_PREBUILT_URL points to a directory ({source}). "
-            f"Pass a {DEFAULT_PREBUILT_ASSET} zip file instead."
-        )
+        raise RuntimeError(f"MISC_PREBUILT_URL points to a directory ({source}), not a Release zip")
     shutil.copy2(source, destination)
-
-
-def _download_with_urllib(source: str, destination: Path) -> None:
-    request = urllib.request.Request(source, headers={"User-Agent": "vapoursynth-misc-build-backend"})
-    with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as handle:
-        shutil.copyfileobj(response, handle)
-
-
-def _download_with_curl(source: str, destination: Path) -> None:
-    curl = shutil.which("curl.exe") or shutil.which("curl")
-    if not curl:
-        raise FileNotFoundError("curl not found")
-    subprocess.run(
-        [curl, "-L", "--fail", "--silent", "--show-error", "-o", str(destination), source],
-        cwd=ROOT,
-        check=True,
-    )
-
-
-def _download_with_powershell(source: str, destination: Path) -> None:
-    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
-    if not powershell:
-        raise FileNotFoundError("powershell not found")
-    subprocess.run(
-        [
-            powershell,
-            "-NoProfile",
-            "-Command",
-            "$ProgressPreference='SilentlyContinue'; "
-            f"Invoke-WebRequest -Uri '{source}' -OutFile '{destination}'",
-        ],
-        cwd=ROOT,
-        check=True,
-    )
 
 
 def _fetch_prebuilt_archive(source: str, destination: Path) -> None:
@@ -135,49 +124,167 @@ def _fetch_prebuilt_archive(source: str, destination: Path) -> None:
         _copy_local_prebuilt(candidate, destination)
         return
 
-    downloaders = [_download_with_urllib, _download_with_curl, _download_with_powershell]
-    last_exc: Exception | None = None
-    for downloader in downloaders:
-        try:
-            downloader(source, destination)
-            return
-        except Exception as exc:  # pragma: no cover - exercised by environment-specific fallbacks
-            last_exc = exc
-
-    raise RuntimeError(
-        "Failed to download the prebuilt vapoursynth-misc release asset from "
-        f"{source!r}. Check network access to GitHub or set MISC_PREBUILT_URL "
-        f"to a local {DEFAULT_PREBUILT_ASSET} file and retry."
-    ) from last_exc
+    request = urllib.request.Request(source, headers={"User-Agent": "vapoursynth-misc-build-backend"})
+    with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
 
 
-def _extract_prebuilt_package(archive_path: Path, staging_root: Path) -> Path:
-    with zipfile.ZipFile(archive_path) as zf:
-        package_members = [
-            name
-            for name in zf.namelist()
-            if name.replace("\\", "/").startswith(f"{PACKAGE_NAME}/") and not name.endswith("/")
+def _write_manifest(package_dir: Path) -> None:
+    (package_dir / "manifest.vs").write_text(
+        "[VapourSynth Manifest V1]\n"
+        f"{PLUGIN_BASENAME}\n",
+        encoding="ascii",
+        newline="\n",
+    )
+
+
+def _stage_archive(archive_path: Path, package_dir: Path) -> None:
+    prefix = f"{PACKAGE_NAME}/"
+    with zipfile.ZipFile(archive_path) as archive:
+        members = [
+            (name, name.replace("\\", "/"))
+            for name in archive.namelist()
+            if name.replace("\\", "/").startswith(prefix) and not name.endswith("/")
         ]
-        if not package_members:
-            raise FileNotFoundError(f"prebuilt archive does not contain a {PACKAGE_NAME}/ package directory")
-
-        for member in package_members:
-            normalized = member.replace("\\", "/")
-            relative = normalized.split("/", 1)[1]
-            out_path = staging_root / PACKAGE_NAME / relative
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(member) as src, out_path.open("wb") as dst:
+        if not members:
+            raise FileNotFoundError(f"prebuilt archive does not contain the required {PACKAGE_NAME}/ directory")
+        for archive_member, normalized_member in members:
+            relative = Path(normalized_member[len(prefix):])
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RuntimeError(f"unsafe archive entry: {normalized_member}")
+            destination = package_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(archive_member) as src, destination.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
 
-    package_dir = staging_root / PACKAGE_NAME
-    required = [
-        package_dir / f"{PLUGIN_BASENAME}.dll",
-        package_dir / "manifest.vs",
+    expected = package_dir / f"{PLUGIN_BASENAME}{_plugin_suffix()}"
+    if not expected.is_file():
+        raise FileNotFoundError(f"prebuilt archive did not provide {expected.name}")
+    if not (package_dir / "manifest.vs").is_file():
+        raise FileNotFoundError("prebuilt archive did not provide manifest.vs")
+
+
+def _truthy(value: str | None) -> bool:
+    return bool(value and value.strip().lower() not in {"", "0", "false", "no", "off"})
+
+
+def _stage_prebuilt_package(version: str, package_dir: Path) -> bool:
+    if _truthy(os.environ.get("MISC_FORCE_BUILD")):
+        print("vapoursynth-misc wheel build: skipping Release asset because MISC_FORCE_BUILD is set")
+        return False
+
+    asset = _prebuilt_asset()
+    if asset is None:
+        print("vapoursynth-misc wheel build: no matching Release asset; falling back to a local native build")
+        return False
+
+    source, explicit = _prebuilt_source(version, asset)
+    try:
+        with tempfile.TemporaryDirectory(prefix="vapoursynth-misc-prebuilt-") as temporary:
+            archive_path = Path(temporary) / asset
+            _fetch_prebuilt_archive(source, archive_path)
+            _stage_archive(archive_path, package_dir)
+    except Exception as exc:
+        if explicit:
+            raise RuntimeError(f"failed to use explicit vapoursynth-misc Release asset {source!r}") from exc
+        print(f"vapoursynth-misc wheel build: Release asset unavailable at {source}; falling back to a local native build ({exc})")
+        return False
+
+    print(f"vapoursynth-misc wheel build: using prebuilt Release asset {source}")
+    return True
+
+
+def _find_vapoursynth_root() -> Path:
+    configured = os.environ.get("MISC_VAPOURSYNTH_ROOT")
+    if configured:
+        candidates = [Path(configured), Path(configured) / "vapoursynth"]
+    else:
+        try:
+            import vapoursynth
+        except ImportError as exc:
+            raise RuntimeError(
+                "VapourSynth R79 headers are required for a native vapoursynth-misc build. "
+                "Install the build requirement or set MISC_VAPOURSYNTH_ROOT to an extracted R79 vapoursynth package."
+            ) from exc
+        candidates = [Path(vapoursynth.__file__).resolve().parent]
+
+    for candidate in candidates:
+        include_dir = candidate / "include"
+        pc_file = candidate / "pkgconfig" / "vapoursynth.pc"
+        if (include_dir / "VapourSynth4.h").is_file() and (include_dir / "VSHelper4.h").is_file() and pc_file.is_file():
+            return candidate.resolve()
+    raise FileNotFoundError(
+        "MISC_VAPOURSYNTH_ROOT must contain include/VapourSynth4.h, include/VSHelper4.h, "
+        "and pkgconfig/vapoursynth.pc"
+    )
+
+
+def _prepend_pkg_config_path(env: dict[str, str], vapoursynth_root: Path) -> None:
+    pkgconfig_dir = vapoursynth_root / "pkgconfig"
+    existing = env.get("PKG_CONFIG_PATH")
+    env["PKG_CONFIG_PATH"] = os.pathsep.join([str(pkgconfig_dir)] + ([existing] if existing else []))
+
+
+def _meson_command() -> list[str]:
+    found = shutil.which("meson")
+    if found:
+        return [found]
+    command = [sys.executable, "-m", "mesonbuild.mesonmain"]
+    probe = subprocess.run(command + ["--version"], cwd=ROOT, capture_output=True, text=True)
+    if probe.returncode == 0:
+        return command
+    raise FileNotFoundError("Meson is required for a native vapoursynth-misc build")
+
+
+def _find_built_plugin(build_dir: Path) -> Path:
+    suffix = _plugin_suffix()
+    candidates = [
+        build_dir / f"{PLUGIN_BASENAME}{suffix}",
+        build_dir / f"lib{PLUGIN_BASENAME}{suffix}",
     ]
-    for path in required:
-        if not path.exists():
-            raise FileNotFoundError(path)
-    return package_dir
+    candidates.extend(build_dir.rglob(f"{PLUGIN_BASENAME}{suffix}"))
+    candidates.extend(build_dir.rglob(f"lib{PLUGIN_BASENAME}{suffix}"))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"native Meson build did not produce {PLUGIN_BASENAME}{suffix}")
+
+
+def _stage_native_package(package_dir: Path) -> None:
+    env = os.environ.copy()
+    vapoursynth_root = _find_vapoursynth_root()
+    _prepend_pkg_config_path(env, vapoursynth_root)
+    meson = _meson_command()
+
+    with tempfile.TemporaryDirectory(prefix="vapoursynth-misc-native-") as temporary:
+        build_dir = Path(temporary) / "build"
+        subprocess.run(
+            meson + ["setup", str(build_dir), str(ROOT), "--buildtype", "release"],
+            cwd=ROOT,
+            env=env,
+            check=True,
+        )
+        subprocess.run(meson + ["compile", "-C", str(build_dir)], cwd=ROOT, env=env, check=True)
+        plugin = _find_built_plugin(build_dir)
+        shutil.copy2(plugin, package_dir / f"{PLUGIN_BASENAME}{_plugin_suffix()}")
+
+    _write_manifest(package_dir)
+    license_file = ROOT / "LICENSE"
+    if license_file.is_file():
+        shutil.copy2(license_file, package_dir / license_file.name)
+    print(f"vapoursynth-misc wheel build: built native plugin using Meson and {vapoursynth_root}")
+
+
+def _wheel_tag(used_prebuilt: bool) -> str:
+    current = _platform_name()
+    if current == "win32" and _is_x86_64():
+        return "py3-none-win_amd64"
+    if current.startswith("linux") and _is_x86_64() and used_prebuilt:
+        platform_tag = os.environ.get("MISC_PLATFORM_TAG") or LINUX_PLATFORM_TAG
+        return f"py3-none-{platform_tag}"
+
+    platform_tag = os.environ.get("MISC_PLATFORM_TAG") or sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    return f"py3-none-{platform_tag}"
 
 
 def _metadata_text() -> str:
@@ -188,47 +295,41 @@ def _metadata_text() -> str:
         f"Version: {project['version']}",
         f"Summary: {project.get('description', '')}",
     ]
-
     requires_python = project.get("requires-python")
     if requires_python:
         lines.append(f"Requires-Python: {requires_python}")
-
     for author in project.get("authors", []):
         name = author.get("name")
         if name:
             lines.append(f"Author: {name}")
-
     for dependency in project.get("dependencies", []):
         lines.append(f"Requires-Dist: {dependency}")
-
     for label, url in project.get("urls", {}).items():
         lines.append(f"Project-URL: {label}, {url}")
-
-    license_files = project.get("license-files", [])
-    for license_file in license_files:
+    for license_file in project.get("license-files", []):
         lines.append(f"License-File: {license_file}")
-
     lines.append("")
     return "\n".join(lines)
 
 
-def _wheel_file_text() -> str:
+def _wheel_file_text(tag: str) -> str:
     return "\n".join(
         [
             "Wheel-Version: 1.0",
             "Generator: vapoursynth-misc custom backend",
             "Root-Is-Purelib: false",
-            f"Tag: {_wheel_tag()}",
+            f"Tag: {tag}",
             "",
         ]
     )
 
 
-def _prepare_dist_info(parent: Path) -> Path:
+def _prepare_dist_info(parent: Path, tag: str | None) -> Path:
     dist_info = parent / _dist_info_dirname()
     dist_info.mkdir(parents=True, exist_ok=True)
     (dist_info / "METADATA").write_text(_metadata_text(), encoding="utf-8", newline="\n")
-    (dist_info / "WHEEL").write_text(_wheel_file_text(), encoding="utf-8", newline="\n")
+    if tag is not None:
+        (dist_info / "WHEEL").write_text(_wheel_file_text(tag), encoding="utf-8", newline="\n")
     return dist_info
 
 
@@ -241,64 +342,54 @@ def _record_digest(path: Path) -> tuple[str, int]:
 
 def _build_wheel_contents(staging_root: Path) -> list[tuple[Path, str]]:
     contents: list[tuple[Path, str]] = []
-
     package_dir = staging_root / PACKAGE_NAME
     for path in sorted(package_dir.rglob("*")):
         if path.is_file():
-            rel = path.relative_to(package_dir).as_posix()
-            contents.append((path, f"vapoursynth/plugins/{PACKAGE_NAME}/{rel}"))
-
+            contents.append((path, f"vapoursynth/plugins/{PACKAGE_NAME}/{path.relative_to(package_dir).as_posix()}"))
     dist_info = staging_root / _dist_info_dirname()
     for path in sorted(dist_info.rglob("*")):
         if path.is_file():
-            rel = path.relative_to(dist_info).as_posix()
-            contents.append((path, f"{_dist_info_dirname()}/{rel}"))
-
+            contents.append((path, f"{_dist_info_dirname()}/{path.relative_to(dist_info).as_posix()}"))
     return contents
 
 
-def _wheel_filename() -> str:
-    return f"{_distribution_name()}-{_project_version()}-{_wheel_tag()}.whl"
+def _wheel_filename(tag: str) -> str:
+    return f"{_distribution_name()}-{_project_version()}-{tag}.whl"
 
 
 def _write_wheel(wheel_path: Path, staging_root: Path) -> None:
     contents = _build_wheel_contents(staging_root)
     record_rows: list[tuple[str, str, str]] = []
-
-    with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for src, dst in contents:
-            zf.write(src, dst)
-            digest, size = _record_digest(src)
-            record_rows.append((dst, digest, str(size)))
-
+    with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for source, destination in contents:
+            archive.write(source, destination)
+            digest, size = _record_digest(source)
+            record_rows.append((destination, digest, str(size)))
         record_path = f"{_dist_info_dirname()}/RECORD"
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False) as handle:
             writer = csv.writer(handle, lineterminator="\n")
-            for row in record_rows:
-                writer.writerow(row)
+            writer.writerows(record_rows)
             writer.writerow((record_path, "", ""))
-            temp_record = Path(handle.name)
-
+            temporary_record = Path(handle.name)
         try:
-            zf.write(temp_record, record_path)
+            archive.write(temporary_record, record_path)
         finally:
-            temp_record.unlink(missing_ok=True)
+            temporary_record.unlink(missing_ok=True)
 
 
-def _build_from_prebuilt(wheel_directory: str) -> str:
+def _build_wheel(wheel_directory: str) -> str:
     Path(wheel_directory).mkdir(parents=True, exist_ok=True)
-    source = _prebuilt_source()
-
-    with tempfile.TemporaryDirectory(prefix="vapoursynth-misc-wheel-") as temp_dir_text:
-        temp_dir = Path(temp_dir_text)
-        archive_path = temp_dir / DEFAULT_PREBUILT_ASSET
-        _fetch_prebuilt_archive(source, archive_path)
-        _extract_prebuilt_package(archive_path, temp_dir)
-        _prepare_dist_info(temp_dir)
-
-        wheel_name = _wheel_filename()
-        wheel_path = Path(wheel_directory) / wheel_name
-        _write_wheel(wheel_path, temp_dir)
+    with tempfile.TemporaryDirectory(prefix="vapoursynth-misc-wheel-") as temporary:
+        staging_root = Path(temporary)
+        package_dir = staging_root / PACKAGE_NAME
+        package_dir.mkdir(parents=True, exist_ok=True)
+        used_prebuilt = _stage_prebuilt_package(_project_version(), package_dir)
+        if not used_prebuilt:
+            _stage_native_package(package_dir)
+        tag = _wheel_tag(used_prebuilt)
+        _prepare_dist_info(staging_root, tag)
+        wheel_name = _wheel_filename(tag)
+        _write_wheel(Path(wheel_directory) / wheel_name, staging_root)
         return wheel_name
 
 
@@ -314,13 +405,13 @@ def get_requires_for_build_sdist(config_settings=None) -> list[str]:
 
 def prepare_metadata_for_build_wheel(metadata_directory: str, config_settings=None) -> str:
     del config_settings
-    dist_info = _prepare_dist_info(Path(metadata_directory))
+    dist_info = _prepare_dist_info(Path(metadata_directory), None)
     return dist_info.name
 
 
 def build_wheel(wheel_directory: str, config_settings=None, metadata_directory=None) -> str:
     del config_settings, metadata_directory
-    return _build_from_prebuilt(wheel_directory)
+    return _build_wheel(wheel_directory)
 
 
 def build_sdist(sdist_directory: str, config_settings=None) -> str:
@@ -328,18 +419,16 @@ def build_sdist(sdist_directory: str, config_settings=None) -> str:
     Path(sdist_directory).mkdir(parents=True, exist_ok=True)
     sdist_name = f"{_distribution_name()}-{_project_version()}.tar.gz"
     sdist_path = Path(sdist_directory) / sdist_name
-
-    with tarfile.open(sdist_path, "w:gz") as tf:
+    with tarfile.open(sdist_path, "w:gz") as archive:
         prefix = f"{_distribution_name()}-{_project_version()}"
         for relative in SDIST_INCLUDE:
-            src = ROOT / relative
-            if not src.exists():
+            source = ROOT / relative
+            if not source.exists():
                 continue
-            if src.is_dir():
-                for path in sorted(src.rglob("*")):
+            if source.is_dir():
+                for path in sorted(source.rglob("*")):
                     if path.is_file():
-                        tf.add(path, arcname=f"{prefix}/{path.relative_to(ROOT).as_posix()}")
+                        archive.add(path, arcname=f"{prefix}/{path.relative_to(ROOT).as_posix()}")
             else:
-                tf.add(src, arcname=f"{prefix}/{src.relative_to(ROOT).as_posix()}")
-
+                archive.add(source, arcname=f"{prefix}/{source.relative_to(ROOT).as_posix()}")
     return sdist_name

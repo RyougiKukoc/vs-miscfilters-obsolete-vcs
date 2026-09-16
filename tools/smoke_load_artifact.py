@@ -1,166 +1,199 @@
+#!/usr/bin/env python3
+"""Explicitly load a packaged MiscFilters plugin with autoload disabled."""
+
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
-import site
 import sys
-import sysconfig
+import tempfile
+import zipfile
 from pathlib import Path
+from typing import Any
 
 
 PACKAGE_NAME = "misc"
 PLUGIN_BASENAME = "miscfilters"
+FUNCTIONS = ("SCDetect", "AverageFrames", "Hysteresis")
 
 
-def resolve_vapoursynth_paths(root: Path | None) -> tuple[Path | None, list[Path], list[Path]]:
-    if root is None:
-        return None, [], []
-
-    root = root.resolve()
-    candidates = [
-        (root, root / "vapoursynth"),
-        (root / "Lib" / "site-packages", root / "Lib" / "site-packages" / "vapoursynth"),
-        (root.parent, root),
-    ]
-    for sys_path, dll_path in candidates:
-        if (dll_path / "libvapoursynth.dll").exists() and (dll_path / "__init__.py").exists():
-            return dll_path, [sys_path], [dll_path]
-    return None, [root], [root]
+def plugin_suffix() -> str:
+    if sys.platform == "win32":
+        return ".dll"
+    if sys.platform == "darwin":
+        return ".dylib"
+    return ".so"
 
 
-def resolve_artifact(root: Path) -> Path:
-    root = root.resolve()
-    candidates = [
-        root,
-        root / PACKAGE_NAME,
-        root / "vapoursynth" / "plugins" / PACKAGE_NAME,
-    ]
-    for candidate in candidates:
-        if (candidate / f"{PLUGIN_BASENAME}.dll").exists():
-            return candidate
-    raise FileNotFoundError(root / PACKAGE_NAME / f"{PLUGIN_BASENAME}.dll")
+def frame_hash(frame: Any) -> str:
+    digest = hashlib.sha256()
+    for plane in range(frame.format.num_planes):
+        digest.update(bytes(frame[plane]))
+    return digest.hexdigest()
 
 
-def add_existing_dll_dirs(paths: list[Path]) -> None:
-    for path in paths:
-        if path.exists():
-            os.add_dll_directory(str(path))
+class IsolatedEnvironmentPolicy:
+    """Make the explicit-load gate independent from ambient plugin autoloading."""
+
+    def __init__(self, flags: int) -> None:
+        self.api: Any = None
+        self.environment: Any = None
+        self.flags = flags
+
+    def on_policy_registered(self, api: Any) -> None:
+        self.api = api
+        self.environment = api.create_environment(self.flags)
+
+    def on_policy_cleared(self) -> None:
+        self.api = None
+        self.environment = None
+
+    def get_current_environment(self) -> Any:
+        return self.environment
+
+    def set_environment(self, environment: Any) -> Any:
+        previous = self.environment
+        if environment is not None:
+            self.environment = environment
+        return previous
+
+    def is_alive(self, environment: Any) -> bool:
+        return environment is self.environment
+
+    def close(self) -> None:
+        if self.api is not None and self.environment is not None:
+            self.api.destroy_environment(self.environment)
+            self.environment = None
 
 
-def exercise_filter(core, vs) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+def install_isolated_policy(vs: Any) -> IsolatedEnvironmentPolicy | None:
+    if not hasattr(vs, "register_policy") or vs.has_policy():
+        return None
+    policy = IsolatedEnvironmentPolicy(int(vs.DISABLE_AUTO_LOADING))
+    vs.register_policy(policy)
+    return policy
+
+
+def resolve_artifact(artifact_dir: str | None, artifact_zip: str | None) -> tuple[Path, Path | None]:
+    if artifact_zip:
+        archive_path = Path(artifact_zip).resolve()
+        if not archive_path.is_file():
+            raise FileNotFoundError(archive_path)
+        temporary = Path(tempfile.mkdtemp(prefix="miscfilters-package-"))
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(temporary)
+        children = [path for path in temporary.iterdir() if path.is_dir()]
+        if len(children) != 1 or children[0].name != PACKAGE_NAME:
+            raise RuntimeError(f"expected exactly one top-level {PACKAGE_NAME}/ directory in {archive_path}")
+        return children[0], temporary
+
+    if artifact_dir is None:
+        raise ValueError("--artifact-dir or --artifact-zip is required")
+    root = Path(artifact_dir).resolve()
+    for candidate in (root, root / PACKAGE_NAME, root / "vapoursynth" / "plugins" / PACKAGE_NAME):
+        if (candidate / f"{PLUGIN_BASENAME}{plugin_suffix()}").is_file():
+            return candidate, None
+    raise FileNotFoundError(root / PACKAGE_NAME / f"{PLUGIN_BASENAME}{plugin_suffix()}")
+
+
+def exercise_filters(core: Any, vs: Any) -> dict[str, object]:
     clip = core.std.BlankClip(format=vs.YUV420P8, width=64, height=32, length=5, color=[96, 128, 128])
     averaged = core.misc.AverageFrames([clip, clip], weights=[1.0, 1.0], scale=2.0)
-    avg_frame = averaged.get_frame(2)
-    avg_stats = core.std.PlaneStats(averaged).get_frame(2).props
+    average_frames = {number: averaged.get_frame(number) for number in (0, 2, 4)}
+    average_hashes = {str(number): frame_hash(frame) for number, frame in average_frames.items()}
+    if len(set(average_hashes.values())) != 1:
+        raise RuntimeError(f"static AverageFrames input produced inconsistent hashes: {average_hashes}")
+    average_stats = dict(core.std.PlaneStats(averaged).get_frame(2).props)
 
     scene = core.misc.SCDetect(clip, threshold=0.1)
-    scene_props = scene.get_frame(2).props
+    scene_frame = scene.get_frame(2)
+    scene_props = scene_frame.props
+    if scene_props["_SceneChangePrev"] != 0 or scene_props["_SceneChangeNext"] != 0:
+        raise RuntimeError(f"static SCDetect clip unexpectedly marked a scene change: {dict(scene_props)}")
 
     seed = core.std.BlankClip(format=vs.GRAY8, width=32, height=16, length=3, color=[255])
     hysteresis = core.misc.Hysteresis(seed, seed)
-    hyst_frame = hysteresis.get_frame(1)
-    hyst_stats = core.std.PlaneStats(hysteresis).get_frame(1).props
+    hysteresis_frame = hysteresis.get_frame(1)
+    hysteresis_stats = dict(core.std.PlaneStats(hysteresis).get_frame(1).props)
 
-    if averaged.width != 64 or averaged.height != 32 or avg_frame.width != 64 or avg_frame.height != 32:
-        raise RuntimeError(
-            f"unexpected AverageFrames output size: node={averaged.width}x{averaged.height}, frame={avg_frame.width}x{avg_frame.height}"
-        )
-    if hysteresis.width != 32 or hysteresis.height != 16 or hyst_frame.width != 32 or hyst_frame.height != 16:
-        raise RuntimeError(
-            f"unexpected Hysteresis output size: node={hysteresis.width}x{hysteresis.height}, frame={hyst_frame.width}x{hyst_frame.height}"
-        )
+    try:
+        core.misc.SCDetect(clip, threshold=1.1)
+    except vs.Error:
+        invalid_input_rejected = True
+    else:
+        invalid_input_rejected = False
+    if not invalid_input_rejected:
+        raise RuntimeError("SCDetect accepted an out-of-range threshold")
 
-    return avg_stats, scene_props, hyst_stats
+    frame = average_frames[2]
+    return {
+        "width": frame.width,
+        "height": frame.height,
+        "format": frame.format.name,
+        "frames": averaged.num_frames,
+        "averageframes_hashes": average_hashes,
+        "averageframes_plane_stats": {
+            "min": float(average_stats["PlaneStatsMin"]),
+            "max": float(average_stats["PlaneStatsMax"]),
+            "average": float(average_stats["PlaneStatsAverage"]),
+        },
+        "scdetect_hash": frame_hash(scene_frame),
+        "scdetect_scene_change_prev": int(scene_props["_SceneChangePrev"]),
+        "scdetect_scene_change_next": int(scene_props["_SceneChangeNext"]),
+        "hysteresis_hash": frame_hash(hysteresis_frame),
+        "hysteresis_plane_stats": {
+            "min": float(hysteresis_stats["PlaneStatsMin"]),
+            "max": float(hysteresis_stats["PlaneStatsMax"]),
+            "average": float(hysteresis_stats["PlaneStatsAverage"]),
+        },
+        "invalid_threshold_rejected": invalid_input_rejected,
+    }
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Smoke-load a built MiscFilters artifact with VapourSynth.")
-    parser.add_argument("--vapoursynth-root", help="VapourSynth portable root or extracted wheel root.")
-    parser.add_argument("--artifact-dir", required=True)
-    parser.add_argument("--autoload", action="store_true", help="Load through VAPOURSYNTH_EXTRA_PLUGIN_PATH instead of std.LoadPlugin.")
-    parser.add_argument("--exercise-filter", action="store_true", help="Create test nodes and request frames.")
+    parser = argparse.ArgumentParser(description="Explicitly smoke-test a MiscFilters package directory or zip.")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--artifact-dir")
+    group.add_argument("--artifact-zip")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    vs_root = Path(args.vapoursynth_root).resolve() if args.vapoursynth_root else None
-    artifact_root = Path(args.artifact_dir).resolve()
-    artifact = resolve_artifact(artifact_root)
-
-    required = [
-        artifact / f"{PLUGIN_BASENAME}.dll",
-        artifact / "manifest.vs",
-    ]
-    for path in required:
-        if not path.exists():
-            print(f"missing required path: {path}", file=sys.stderr)
-            return 1
-
-    _vs_pkg, sys_paths, dll_paths = resolve_vapoursynth_paths(vs_root)
-    for path in reversed(sys_paths):
-        if path.exists():
-            sys.path.insert(0, str(path))
-
-    add_existing_dll_dirs(
-        [
-            artifact,
-            Path(sys.executable).resolve().parent,
-            Path(sysconfig.get_paths().get("platlib", "")),
-            Path(sysconfig.get_paths().get("purelib", "")),
-            *(Path(p) for p in site.getsitepackages()),
-            *dll_paths,
-        ]
-    )
-
-    if args.autoload:
-        plugin_root = artifact.parent
-        if artifact_root.joinpath("vapoursynth", "plugins").exists():
-            plugin_root = artifact_root / "vapoursynth" / "plugins"
-        elif artifact_root.joinpath(PACKAGE_NAME).exists():
-            plugin_root = artifact_root
-        os.environ["VAPOURSYNTH_EXTRA_PLUGIN_PATH"] = str(plugin_root)
+    package_dir, temporary = resolve_artifact(args.artifact_dir, args.artifact_zip)
+    plugin = package_dir / f"{PLUGIN_BASENAME}{plugin_suffix()}"
+    manifest = package_dir / "manifest.vs"
+    if not manifest.is_file():
+        raise FileNotFoundError(manifest)
 
     try:
+        add_dll_directory = getattr(os, "add_dll_directory", None)
+        handles = [add_dll_directory(str(package_dir))] if add_dll_directory is not None else []
         import vapoursynth as vs
-    except ImportError as exc:
-        print(f"failed to import VapourSynth Python module: {exc}", file=sys.stderr)
-        print("install VapourSynth into this Python or pass --vapoursynth-root pointing at an extracted wheel", file=sys.stderr)
-        return 1
 
-    try:
-        flags = 0 if args.autoload else vs.DISABLE_AUTO_LOADING
-        env = vs.create_environment(flags=flags)
-        core = env.get_core()
-    except AttributeError:
+        policy = install_isolated_policy(vs)
         core = vs.core
-
-    if not args.autoload:
-        core.std.LoadPlugin(str(artifact / f"{PLUGIN_BASENAME}.dll"))
-    if not hasattr(core, "misc"):
-        print("core.misc missing after loading artifact", file=sys.stderr)
-        return 1
-
-    required_functions = ("SCDetect", "AverageFrames", "Hysteresis")
-    for function_name in required_functions:
-        if not hasattr(core.misc, function_name):
-            print(f"core.misc.{function_name} missing after loading artifact", file=sys.stderr)
-            return 1
-        print(getattr(core.misc, function_name))
-
-    if args.exercise_filter:
-        try:
-            avg_stats, scene_props, hyst_stats = exercise_filter(core, vs)
-        except Exception as exc:
-            print(f"filter exercise failed: {exc}", file=sys.stderr)
-            return 1
-
-        print(f"AverageFrames PlaneStatsMin={avg_stats['PlaneStatsMin']}")
-        print(f"AverageFrames PlaneStatsMax={avg_stats['PlaneStatsMax']}")
-        print(f"AverageFrames PlaneStatsAverage={avg_stats['PlaneStatsAverage']}")
-        print(f"SCDetect _SceneChangePrev={scene_props['_SceneChangePrev']}")
-        print(f"SCDetect _SceneChangeNext={scene_props['_SceneChangeNext']}")
-        print(f"Hysteresis PlaneStatsMin={hyst_stats['PlaneStatsMin']}")
-        print(f"Hysteresis PlaneStatsMax={hyst_stats['PlaneStatsMax']}")
-        print(f"Hysteresis PlaneStatsAverage={hyst_stats['PlaneStatsAverage']}")
-    return 0
+        core.std.LoadPlugin(str(plugin))
+        for function_name in FUNCTIONS:
+            if not hasattr(core.misc, function_name):
+                raise RuntimeError(f"core.misc.{function_name} missing after explicit LoadPlugin")
+        result: dict[str, object] = {
+            "plugin": str(plugin),
+            "manifest": str(manifest),
+            "functions": list(FUNCTIONS),
+            "explicit_load": True,
+        }
+        result.update(exercise_filters(core, vs))
+        print(json.dumps(result, indent=2, sort_keys=True) if args.json else result)
+        return 0
+    finally:
+        if "policy" in locals() and policy is not None:
+            policy.close()
+        for handle in locals().get("handles", []):
+            handle.close()
+        if temporary is not None:
+            # Keep extraction available for the current process's failure diagnostics.
+            pass
 
 
 if __name__ == "__main__":

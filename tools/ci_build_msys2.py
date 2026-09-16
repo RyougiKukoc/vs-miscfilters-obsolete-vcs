@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEPS = ROOT / "_deps"
 DEFAULT_BUILD = ROOT / "build-ci-msys2"
 DEFAULT_DIST = ROOT / "dist" / "msys2-ucrt64"
-VAPOURSYNTH_VERSION = "77"
+VAPOURSYNTH_VERSION = "79"
 PACKAGE_NAME = "misc"
 PLUGIN_BASENAME = "miscfilters"
 
@@ -110,7 +110,7 @@ def write_vapoursynth_pc(pc_dir: Path, vs_pkg: Path) -> Path:
                 "includedir=${prefix}/include",
                 "",
                 "Name: vapoursynth",
-                "Description: VapourSynth R77 wheel headers for MSYS2 builds",
+                "Description: VapourSynth R79 wheel headers for MSYS2 builds",
                 f"Version: {VAPOURSYNTH_VERSION}",
                 "Libs:",
                 "Cflags: -I${includedir}",
@@ -191,7 +191,7 @@ def main(argv: list[str]) -> int:
     build_dir = Path(args.build_dir).resolve()
     dist_dir = Path(args.dist_dir).resolve()
     pkg_dir = dist_dir / PACKAGE_NAME
-    vs_root = Path(args.vapoursynth_root).resolve() if args.vapoursynth_root else deps / "vapoursynth-wheel-R77"
+    vs_root = Path(args.vapoursynth_root).resolve() if args.vapoursynth_root else deps / "vapoursynth-wheel-R79"
     vs_pkg = resolve_vapoursynth_package(vs_root)
 
     for path in [
@@ -218,7 +218,7 @@ def main(argv: list[str]) -> int:
         ],
     )
 
-    pc_dir = vs_pkg / "lib" / "pkgconfig"
+    pc_dir = vs_pkg / "pkgconfig"
     write_vapoursynth_pc(pc_dir, vs_pkg)
     pc_paths = [str(pc_dir.resolve())]
     existing_pc = env.get("PKG_CONFIG_PATH")

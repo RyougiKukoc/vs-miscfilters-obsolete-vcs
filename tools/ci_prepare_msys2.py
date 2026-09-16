@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEPS = ROOT / "_deps"
-VAPOURSYNTH_VERSION = "77"
+VAPOURSYNTH_VERSION = "79"
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> None:
@@ -36,7 +36,7 @@ def download_wheel(deps: Path) -> Path:
             "--platform",
             "win_amd64",
             "--python-version",
-            "312",
+            "313",
             "--abi",
             "abi3",
             "--dest",
@@ -51,7 +51,7 @@ def download_wheel(deps: Path) -> Path:
 
 
 def write_pkg_config(vs_pkg: Path) -> None:
-    pc_dir = vs_pkg / "lib" / "pkgconfig"
+    pc_dir = vs_pkg / "pkgconfig"
     pc_dir.mkdir(parents=True, exist_ok=True)
     prefix = vs_pkg.resolve().as_posix()
     (pc_dir / "vapoursynth.pc").write_text(
@@ -62,7 +62,7 @@ def write_pkg_config(vs_pkg: Path) -> None:
                 "includedir=${prefix}/include",
                 "",
                 "Name: vapoursynth",
-                "Description: VapourSynth R77 wheel headers for MSYS2 builds",
+                "Description: VapourSynth R79 wheel headers for MSYS2 builds",
                 f"Version: {VAPOURSYNTH_VERSION}",
                 "Libs:",
                 "Cflags: -I${includedir}",
@@ -99,7 +99,7 @@ def prepare_vapoursynth(deps: Path) -> Path:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Prepare VapourSynth R77 wheel files for the MSYS2 build.")
+    parser = argparse.ArgumentParser(description="Prepare VapourSynth R79 wheel files for the MSYS2 build.")
     parser.add_argument("--deps-dir", default=str(DEFAULT_DEPS), help="Dependency cache/work directory.")
     args = parser.parse_args(argv)
 
@@ -108,7 +108,7 @@ def main(argv: list[str]) -> int:
     vs_root = prepare_vapoursynth(deps)
     print("Prepared dependencies:")
     print(f"VAPOURSYNTH_WHEEL_ROOT={vs_root}")
-    print(f"PKG_CONFIG_PATH={vs_root / 'vapoursynth' / 'lib' / 'pkgconfig'}")
+    print(f"PKG_CONFIG_PATH={vs_root / 'vapoursynth' / 'pkgconfig'}")
     return 0
 
 

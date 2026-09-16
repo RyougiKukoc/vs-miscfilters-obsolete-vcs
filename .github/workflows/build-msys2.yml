@@ -1,11 +1,9 @@
-name: Build MSYS2
+name: Build release packages
 
 on:
   push:
-    branches:
-      - master
-    tags:
-      - "v*"
+    branches: [master]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -13,129 +11,243 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  windows:
     name: Build Windows UCRT64
     runs-on: windows-2025
 
-    defaults:
-      run:
-        shell: msys2 {0}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up CPython
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
-      - name: Install Python tools
-        shell: cmd
-        run: >-
-          "%pythonLocation%\python.exe" -m pip install --upgrade pip build
+      - name: Install host Python tools and VapourSynth R79
+        run: python -m pip install --upgrade pip build "VapourSynth==79"
 
-      - name: Set up MSYS2
+      - name: Set up MSYS2 UCRT64
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: true
           install: >-
             mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-meson
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-pkgconf
 
-      - name: Prepare VapourSynth R77 wheel
-        shell: cmd
-        run: >-
-          "%pythonLocation%\python.exe" tools\ci_prepare_msys2.py
+      - name: Prepare VapourSynth R79 wheel SDK
+        run: python tools/ci_prepare_msys2.py
 
-      - name: Build plugin
+      - name: Build Windows package directory
+        shell: msys2 {0}
         run: /ucrt64/bin/python tools/ci_build_msys2.py --clean
 
-      - name: Smoke-load artifact
-        shell: cmd
-        run: >-
-          "%pythonLocation%\python.exe" tools\smoke_load_artifact.py
-          --vapoursynth-root _deps\vapoursynth-wheel-R77
-          --artifact-dir dist\msys2-ucrt64
-          --exercise-filter
+      - name: Explicitly smoke-test package directory
+        run: python tools/smoke_load_artifact.py --artifact-dir dist/msys2-ucrt64 --json
 
-      - name: Smoke-load artifact through manifest autoload
-        shell: cmd
+      - name: Package Windows Release zip
         run: >-
-          "%pythonLocation%\python.exe" tools\smoke_load_artifact.py
-          --vapoursynth-root _deps\vapoursynth-wheel-R77
-          --artifact-dir dist\msys2-ucrt64
-          --autoload
-          --exercise-filter
+          python tools/package_plugin_zip.py
+          --input-dir dist/msys2-ucrt64
+          --output dist/misc-msys2-ucrt64.zip
+          --plugin-suffix .dll
 
-      - name: Pack release zip
-        shell: cmd
-        run: >-
-          "%pythonLocation%\python.exe" tools\package_plugin_zip.py
-          --input-dir dist\msys2-ucrt64
-          --output dist\misc-msys2-ucrt64.zip
-
-      - name: Build wheel from local prebuilt package
-        shell: cmd
+      - name: Build wheel from tested Release payload
         env:
           MISC_PREBUILT_URL: ${{ github.workspace }}\dist\misc-msys2-ucrt64.zip
-        run: >-
-          "%pythonLocation%\python.exe" -m build --wheel --no-isolation --outdir dist\wheels
+        run: python -m build --wheel --no-isolation --outdir dist/wheels
 
-      - name: Install built wheel
-        shell: cmd
-        run: >-
-          for %%I in (dist\wheels\*.whl) do "%pythonLocation%\python.exe" -m pip install --force-reinstall "%%~fI"
-
-      - name: Smoke test installed wheel
-        shell: cmd
-        run: >-
-          "%pythonLocation%\python.exe" tools\smoke_installed_wheel.py --exercise-filter
-
-      - name: Smoke test source install with prebuilt release asset
-        shell: cmd
-        env:
-          MISC_PREBUILT_URL: ${{ github.workspace }}\dist\misc-msys2-ucrt64.zip
+      - name: Install and smoke-test Release-backed wheel
+        shell: pwsh
         run: |
-          "%pythonLocation%\python.exe" -m pip uninstall -y vapoursynth-misc
-          "%pythonLocation%\python.exe" -m pip install --force-reinstall --no-deps --no-build-isolation -v .
-          "%pythonLocation%\python.exe" tools\smoke_installed_wheel.py --exercise-filter
+          $wheel = Get-ChildItem dist/wheels/*.whl | Select-Object -First 1 -ExpandProperty FullName
+          python -m pip install --force-reinstall --no-deps $wheel
+          python tools/smoke_installed_wheel.py --json
 
-      - name: Upload package directory
-        uses: actions/upload-artifact@v4
+      - name: Force and smoke-test native fallback
+        shell: pwsh
+        run: |
+          $env:MISC_FORCE_BUILD = '1'
+          $env:MISC_VAPOURSYNTH_ROOT = "$env:GITHUB_WORKSPACE\_deps\vapoursynth-wheel-R79\vapoursynth"
+          $env:PATH = "C:\msys64\ucrt64\bin;C:\msys64\usr\bin;$env:PATH"
+          $env:CC = 'gcc'
+          $env:CXX = 'g++'
+          $env:PKG_CONFIG = 'pkg-config'
+          python -m build --wheel --no-isolation --outdir dist/wheels-fallback
+          $wheel = Get-ChildItem dist/wheels-fallback/*.whl | Select-Object -First 1 -ExpandProperty FullName
+          python -m pip install --force-reinstall --no-deps $wheel
+          python tools/smoke_installed_wheel.py --json
+
+      - name: Stage Windows Release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/release-assets-windows | Out-Null
+          Copy-Item dist/misc-msys2-ucrt64.zip dist/release-assets-windows/
+          Copy-Item dist/wheels/*.whl dist/release-assets-windows/
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: misc-msys2-ucrt64
-          path: dist/msys2-ucrt64
+          name: misc-release-assets-windows
+          path: dist/release-assets-windows
+          if-no-files-found: error
 
-      - name: Upload release zip artifact
-        uses: actions/upload-artifact@v4
+  linux-build:
+    name: Build Linux x86_64 payload
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build R79-compatible wheel and Release zip in manylinux
+        shell: bash
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+            quay.io/pypa/manylinux2014_x86_64 bash -lc '
+              set -exo pipefail
+              py=/opt/python/cp312-cp312/bin/python
+              source /opt/rh/devtoolset-10/enable
+              set -u
+              export PATH="/opt/python/cp312-cp312/bin:$PATH"
+              "$py" -m pip install --upgrade pip build meson ninja
+              rm -rf _deps/vapoursynth-wheel dist/wheels-linux dist/linux-x86_64 dist/release-assets-linux
+              mkdir -p _deps/vapoursynth-wheel/extracted dist/wheels-linux dist/linux-x86_64/unpacked
+              "$py" -m pip download --only-binary=:all: --no-deps \
+                --platform manylinux_2_27_x86_64 --implementation cp --python-version 312 --abi abi3 \
+                "VapourSynth==79" -d _deps/vapoursynth-wheel
+              unzip -q _deps/vapoursynth-wheel/*.whl -d _deps/vapoursynth-wheel/extracted
+              export MISC_VAPOURSYNTH_ROOT=/workspace/_deps/vapoursynth-wheel/extracted/vapoursynth
+              export MISC_FORCE_BUILD=1
+              export MISC_PLATFORM_TAG=manylinux_2_27_x86_64
+              export PKG_CONFIG_PATH=/unrelated/pkgconfig
+              "$py" -m build --wheel --no-isolation --skip-dependency-check --outdir dist/wheels-linux
+              wheel=$(find dist/wheels-linux -name "*.whl" -print -quit)
+              test -n "$wheel"
+              unzip -q "$wheel" "vapoursynth/plugins/misc/*" -d dist/linux-x86_64/unpacked
+              mv dist/linux-x86_64/unpacked/vapoursynth/plugins/misc dist/linux-x86_64/misc
+              "$py" tools/package_plugin_zip.py --input-dir dist/linux-x86_64 --output dist/misc-linux-x86_64.zip --plugin-suffix .so
+              mkdir -p dist/release-assets-linux
+              cp dist/misc-linux-x86_64.zip "$wheel" dist/release-assets-linux/
+              "$py" -c "import re, subprocess; out = subprocess.check_output([\"readelf\", \"--version-info\", \"dist/linux-x86_64/misc/miscfilters.so\"], text=True); versions = [tuple(map(int, value.split(\".\"))) for value in re.findall(r\"GLIBC_(\\d+\\.\\d+)\", out)]; assert all(version <= (2, 17) for version in versions), versions"
+            '
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: misc-release-zip
-          path: dist/misc-msys2-ucrt64.zip
+          name: misc-release-assets-linux
+          path: dist/release-assets-linux
+          if-no-files-found: error
 
-      - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+  linux-runtime-smoke:
+    name: Smoke Linux Release payload
+    needs: linux-build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
         with:
-          name: misc-wheel-win64
-          path: dist/wheels
+          name: misc-release-assets-linux
+          path: dist/release-assets-linux
 
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: powershell
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install runtime and packaging tools
+        run: python -m pip install --upgrade pip "VapourSynth==79" meson ninja
+
+      - name: Explicitly load the Release zip with autoload disabled
+        run: python tools/smoke_load_artifact.py --artifact-zip dist/release-assets-linux/misc-linux-x86_64.zip --json
+
+      - name: Install and smoke-test the published wheel shape
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --force-reinstall --no-deps dist/release-assets-linux/*.whl
+          python tools/smoke_installed_wheel.py --json
+
+      - name: Loop back source install through the Linux Release payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip uninstall -y vapoursynth-misc
+          export MISC_PREBUILT_URL="$GITHUB_WORKSPACE/dist/release-assets-linux/misc-linux-x86_64.zip"
+          python -m pip install --force-reinstall --no-deps --no-build-isolation -v . 2>&1 | tee source-install.log
+          grep -F "using prebuilt Release asset" source-install.log
+          python tools/smoke_installed_wheel.py --json
+
+      - name: Force and smoke-test Linux native fallback
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip uninstall -y vapoursynth-misc
+          export MISC_FORCE_BUILD=1
+          export PKG_CONFIG_PATH=/unrelated/pkgconfig
+          python -m pip install --force-reinstall --no-deps --no-build-isolation -v .
+          python tools/smoke_installed_wheel.py --json
+
+  macos-fallback:
+    name: Smoke macOS source fallback
+    runs-on: macos-13
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build without a macOS Release asset
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip "VapourSynth==79" meson ninja
+          export PKG_CONFIG_PATH=/unrelated/pkgconfig
+          python -m pip wheel --no-deps --wheel-dir dist/wheels-macos .
+          wheel=$(find dist/wheels-macos -name "*.whl" -print -quit)
+          test -n "$wheel"
+          mkdir -p dist/macos-unpacked
+          unzip -q "$wheel" "vapoursynth/plugins/misc/*" -d dist/macos-unpacked
+          python tools/smoke_load_artifact.py --artifact-dir dist/macos-unpacked/vapoursynth/plugins/misc --json
+          python -m pip install --force-reinstall --no-deps "$wheel"
+          python tools/smoke_installed_wheel.py --json
+
+  publish-release:
+    name: Publish Release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux-runtime-smoke, macos-fallback]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: misc-release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update exactly one Release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $tag = $env:RELEASE_TAG
-          $assets = @("dist\misc-msys2-ucrt64.zip")
-          $assets += Get-ChildItem dist\wheels\*.whl | Select-Object -ExpandProperty FullName
-          & cmd.exe /d /c "gh release view $tag --repo $env:GITHUB_REPOSITORY >NUL 2>NUL"
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $assets --clobber --repo $env:GITHUB_REPOSITORY
-          } else {
-            gh release create $tag $assets --title $tag --notes "Automated MSYS2/UCRT64 build." --repo $env:GITHUB_REPOSITORY
-          }
+          set -euxo pipefail
+          tag="$GITHUB_REF_NAME"
+          expected=(
+            misc-msys2-ucrt64.zip
+            misc-linux-x86_64.zip
+            vapoursynth_misc-2.1-py3-none-win_amd64.whl
+            vapoursynth_misc-2.1-py3-none-manylinux_2_27_x86_64.whl
+          )
+          for asset in "${expected[@]}"; do test -f "release-assets/$asset"; done
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | while read -r asset; do
+              gh release delete-asset "$tag" "$asset" --yes --repo "$GITHUB_REPOSITORY"
+            done
+            gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" release-assets/* --title "$tag" --notes "Automated Windows and Linux release for $tag." --repo "$GITHUB_REPOSITORY"
+          fi
+          actual=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)
+          expected_sorted=$(printf '%s\n' "${expected[@]}" | sort)
+          test "$actual" = "$expected_sorted"

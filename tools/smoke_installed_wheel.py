@@ -1,108 +1,45 @@
+#!/usr/bin/env python3
+"""Smoke-test MiscFilters through normal VapourSynth wheel autoloading."""
+
 from __future__ import annotations
 
 import argparse
-import os
-import site
+import json
 import sys
-import sysconfig
 from pathlib import Path
+
+from smoke_load_artifact import FUNCTIONS, exercise_filters, plugin_suffix
 
 
 PACKAGE_NAME = "misc"
 PLUGIN_BASENAME = "miscfilters"
 
 
-def add_existing_dll_dirs(paths: list[Path]) -> None:
-    for path in paths:
-        if path.exists():
-            os.add_dll_directory(str(path))
-
-
-def exercise_filter(core, vs) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
-    clip = core.std.BlankClip(format=vs.YUV420P8, width=64, height=32, length=5, color=[96, 128, 128])
-    averaged = core.misc.AverageFrames([clip, clip], weights=[1.0, 1.0], scale=2.0)
-    avg_stats = core.std.PlaneStats(averaged).get_frame(2).props
-
-    scene = core.misc.SCDetect(clip, threshold=0.1)
-    scene_props = scene.get_frame(2).props
-
-    seed = core.std.BlankClip(format=vs.GRAY8, width=32, height=16, length=3, color=[255])
-    hysteresis = core.misc.Hysteresis(seed, seed)
-    hyst_stats = core.std.PlaneStats(hysteresis).get_frame(1).props
-
-    return avg_stats, scene_props, hyst_stats
-
-
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Smoke-test an installed vapoursynth-misc wheel.")
-    parser.add_argument("--exercise-filter", action="store_true", help="Create test nodes and request frames.")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    try:
-        import vapoursynth as vs
-    except ImportError as exc:
-        print(f"failed to import VapourSynth Python module: {exc}", file=sys.stderr)
-        return 1
+    import vapoursynth as vs
 
-    vs_pkg = Path(vs.__file__).resolve().parent
-    plugin_dir = vs_pkg / "plugins" / PACKAGE_NAME
-    plugin_candidates = [
-        plugin_dir / f"{PLUGIN_BASENAME}.dll",
-        plugin_dir / f"{PLUGIN_BASENAME}.so",
-        plugin_dir / f"{PLUGIN_BASENAME}.dylib",
-    ]
-    plugin_path = next((path for path in plugin_candidates if path.exists()), None)
-    if plugin_path is None:
-        print(f"missing installed plugin under {plugin_dir}", file=sys.stderr)
-        return 1
-    manifest = plugin_dir / "manifest.vs"
-    if not manifest.exists():
-        print(f"missing installed file: {manifest}", file=sys.stderr)
-        return 1
+    package_dir = Path(vs.__file__).resolve().parent / "plugins" / PACKAGE_NAME
+    plugin = package_dir / f"{PLUGIN_BASENAME}{plugin_suffix()}"
+    manifest = package_dir / "manifest.vs"
+    if not plugin.is_file() or not manifest.is_file():
+        raise FileNotFoundError(f"installed wheel payload is incomplete under {package_dir}")
 
-    add_existing_dll_dirs(
-        [
-            plugin_dir,
-            vs_pkg,
-            Path(sys.executable).resolve().parent,
-            Path(sysconfig.get_paths().get("platlib", "")),
-            Path(sysconfig.get_paths().get("purelib", "")),
-            *(Path(p) for p in site.getsitepackages()),
-        ]
-    )
-
-    try:
-        env = vs.create_environment()
-        core = env.get_core()
-    except AttributeError:
-        core = vs.core
-
-    if not hasattr(core, "misc"):
-        print("core.misc missing after installed-wheel autoload", file=sys.stderr)
-        return 1
-
-    required_functions = ("SCDetect", "AverageFrames", "Hysteresis")
-    for function_name in required_functions:
+    core = vs.core
+    for function_name in FUNCTIONS:
         if not hasattr(core.misc, function_name):
-            print(f"core.misc.{function_name} missing after installed-wheel autoload", file=sys.stderr)
-            return 1
-        print(getattr(core.misc, function_name))
-
-    if args.exercise_filter:
-        try:
-            avg_stats, scene_props, hyst_stats = exercise_filter(core, vs)
-        except Exception as exc:
-            print(f"filter exercise failed: {exc}", file=sys.stderr)
-            return 1
-
-        print(f"AverageFrames PlaneStatsMin={avg_stats['PlaneStatsMin']}")
-        print(f"AverageFrames PlaneStatsMax={avg_stats['PlaneStatsMax']}")
-        print(f"AverageFrames PlaneStatsAverage={avg_stats['PlaneStatsAverage']}")
-        print(f"SCDetect _SceneChangePrev={scene_props['_SceneChangePrev']}")
-        print(f"SCDetect _SceneChangeNext={scene_props['_SceneChangeNext']}")
-        print(f"Hysteresis PlaneStatsMin={hyst_stats['PlaneStatsMin']}")
-        print(f"Hysteresis PlaneStatsMax={hyst_stats['PlaneStatsMax']}")
-        print(f"Hysteresis PlaneStatsAverage={hyst_stats['PlaneStatsAverage']}")
+            raise RuntimeError(f"core.misc.{function_name} missing after installed-wheel autoload")
+    result: dict[str, object] = {
+        "plugin": str(plugin),
+        "manifest": str(manifest),
+        "functions": list(FUNCTIONS),
+        "autoload": True,
+    }
+    result.update(exercise_filters(core, vs))
+    print(json.dumps(result, indent=2, sort_keys=True) if args.json else result)
     return 0
 
 
