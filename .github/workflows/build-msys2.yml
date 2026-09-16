@@ -22,8 +22,8 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install host Python tools and VapourSynth R79
-        run: python -m pip install --upgrade pip build "VapourSynth==79"
+      - name: Install host Python build requirements and VapourSynth R79
+        run: python -m pip install --upgrade pip build meson ninja "VapourSynth==79"
 
       - name: Set up MSYS2 UCRT64
         uses: msys2/setup-msys2@v2
