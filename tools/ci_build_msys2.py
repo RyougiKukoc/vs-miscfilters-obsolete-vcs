@@ -218,13 +218,12 @@ def main(argv: list[str]) -> int:
         ],
     )
 
-    pc_dir = vs_pkg / "pkgconfig"
+    # MSYS Python uses ':' as a path separator, so inheriting a Windows
+    # drive-letter PKG_CONFIG_PATH can select an unrelated, malformed SDK pc.
+    pc_dir = deps / "pkgconfig-miscfilters-r79"
     write_vapoursynth_pc(pc_dir, vs_pkg)
-    pc_paths = [str(pc_dir.resolve())]
-    existing_pc = env.get("PKG_CONFIG_PATH")
-    if existing_pc:
-        pc_paths.append(existing_pc)
-    env["PKG_CONFIG_PATH"] = os.pathsep.join(pc_paths)
+    env["PKG_CONFIG_PATH"] = str(pc_dir.resolve())
+    env["PKG_CONFIG_LIBDIR"] = str(pc_dir.resolve())
 
     if "CC" not in env:
         env["CC"] = find_tool("gcc", env.get("PATH"))
