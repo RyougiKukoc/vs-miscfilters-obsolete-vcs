@@ -1,3 +1,9 @@
+# Deprecated
+
+This repository is deprecated. Please use [vapoursynth-api4-wheels](https://github.com/AliceTeaParty/vapoursynth-api4-wheels).
+
+---
+
 # vapoursynth-misc
 
 `vapoursynth-misc` packages the API4-era Miscellaneous Filters plugin for VapourSynth.
